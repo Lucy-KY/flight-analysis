@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Service identifier (must be unique) -->
+    <key>Label</key>
+    <string>com.flight.daily-pipeline</string>
+
+    <!-- Command to run -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/kaikai/Documents/WashU/2026Spring/CSE-5114/Final/code/.venv/bin/python</string>
+        <string>/Users/kaikai/Documents/WashU/2026Spring/CSE-5114/Final/code/pipeline/daily_pipeline.py</string>
+        <string>--states-only</string>
+    </array>
+
+    <!-- Working directory (so .env is found) -->
+    <key>WorkingDirectory</key>
+    <string>/Users/kaikai/Documents/WashU/2026Spring/CSE-5114/Final/code</string>
+
+    <!-- Run daily at 06:00 AM -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Log output -->
+    <key>StandardOutPath</key>
+    <string>/Users/kaikai/Documents/WashU/2026Spring/CSE-5114/Final/code/logs/daily_pipeline.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kaikai/Documents/WashU/2026Spring/CSE-5114/Final/code/logs/daily_pipeline.err.log</string>
+
+    <!-- Restart if crashed -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Run missed jobs when Mac wakes up (if it was asleep at 6am) -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
