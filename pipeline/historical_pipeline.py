@@ -108,14 +108,17 @@ def step_load_snowflake(dry_run: bool = False):
         logger.info("[DRY RUN] Skipping Snowflake load")
         return
 
-    staging_dir = CLEANED_DIR / "staging"
-    if not staging_dir.exists():
-        logger.error("Staging dir not found: %s", staging_dir)
+    # Load from the RAW parquet (column names match BTS_ONTIME_RAW exactly).
+    # The STAGING parquet uses renamed columns (IS_CANCELLED, DEP_DELAY_MIN, …)
+    # and is NOT used here — STAGING.FLIGHTS is populated later via SQL INSERT.
+    raw_parquet_dir = CLEANED_DIR / "raw"
+    if not raw_parquet_dir.exists():
+        logger.error("Raw parquet dir not found: %s", raw_parquet_dir)
         return
 
-    parquet_dirs = sorted(staging_dir.iterdir())
+    parquet_dirs = sorted(raw_parquet_dir.iterdir())
     if not parquet_dirs:
-        logger.error("No parquet directories found in %s", staging_dir)
+        logger.error("No parquet directories found in %s", raw_parquet_dir)
         return
 
     conn = get_conn(schema="RAW")

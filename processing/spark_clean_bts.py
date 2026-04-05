@@ -287,8 +287,8 @@ def process_zip(spark: SparkSession, zip_path: Path, output_dir: Path, write_sta
         df = rename_and_cast(df)
         df = clean_bts(df)
 
-        row_count = df.count()
-        logger.info(f"  {row_count:,} rows after cleaning")
+        # Persist before multiple writes to avoid recomputing the full pipeline twice
+        df.persist()
 
         # Write RAW parquet
         raw_out = output_dir / "raw" / stem
@@ -301,6 +301,9 @@ def process_zip(spark: SparkSession, zip_path: Path, output_dir: Path, write_sta
             staging_out = output_dir / "staging" / stem
             staging_df.write.mode("overwrite").parquet(str(staging_out))
             logger.info(f"  STAGING parquet → {staging_out}")
+
+        logger.info(f"  Done: {stem}")
+        df.unpersist()
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

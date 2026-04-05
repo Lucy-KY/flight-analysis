@@ -189,21 +189,6 @@ python analysis/run_analytics.py --query airline
 
 ---
 
-## API Decision: Why OpenSky Network?
-
-| API | Free Tier | Daily Automation | US Coverage | Delay Data |
-|-----|-----------|-----------------|-------------|-----------|
-| **OpenSky Network** | ✅ Fully free | ✅ Yes | ✅ Full | ❌ ADS-B only |
-| FlightAware AeroAPI | ❌ $0.005/query | ✅ Yes | ✅ Full | ✅ Yes |
-| AviationStack | ⚠️ 500 req/month | ❌ Too limited | ✅ Full | ✅ Yes |
-| Aviation Edge | ❌ Paid only | ✅ Yes | ✅ Full | ✅ Yes |
-| ADS-B Exchange | ❌ Commercial requires license | ✅ Yes | ✅ Full | ❌ ADS-B only |
-
-**Choice: OpenSky Network** (free, research-friendly, sufficient for daily incremental volume tracking).
-Delay data comes from the historical BTS dataset which remains the primary analytical source.
-
----
-
 ## Snowflake Schema Design
 
 ### Layered Architecture

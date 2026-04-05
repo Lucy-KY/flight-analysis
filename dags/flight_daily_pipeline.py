@@ -195,12 +195,11 @@ with DAG(
             )
         )
 
-        row_count = df.count()
         out_dir   = os.path.join(WORK_DIR, "data", "opensky_clean", date_str)
         df.write.mode("overwrite").parquet(out_dir)
         spark.stop()
 
-        print(f"Cleaned {row_count} rows → {out_dir}")
+        print(f"Cleaned OpenSky data → {out_dir}")
         return out_dir
 
     # ── Task 3: Load to Snowflake (same style as Assignment3) ────────────────

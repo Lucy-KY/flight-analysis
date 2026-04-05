@@ -202,10 +202,9 @@ def main():
         if flight_files:
             df = clean_flights_df(spark, flight_files)
             if df:
-                count = df.count()
                 out = output_dir / "flights"
                 df.write.mode("overwrite").partitionBy("FETCH_DATE").parquet(str(out))
-                logger.info("Flights: %d rows → %s", count, out)
+                logger.info("Flights written → %s", out)
 
     if args.type in ("states", "all"):
         state_files = find_json_files(input_dir, "states_*.json")
@@ -213,10 +212,9 @@ def main():
         if state_files:
             df = clean_states_df(spark, state_files)
             if df:
-                count = df.count()
                 out = output_dir / "states"
                 df.write.mode("overwrite").partitionBy("FETCH_DATE").parquet(str(out))
-                logger.info("States: %d rows → %s", count, out)
+                logger.info("States written → %s", out)
 
     spark.stop()
     logger.info("Done.")
