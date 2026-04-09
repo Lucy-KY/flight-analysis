@@ -21,3 +21,9 @@ pyarrow>=14.0.0
 # Visualization
 streamlit>=1.32.0
 plotly>=5.20.0
+
+# ML / Prediction
+xgboost>=2.0.0
+shap>=0.45.0
+optuna>=3.0.0
+joblib>=1.3.0

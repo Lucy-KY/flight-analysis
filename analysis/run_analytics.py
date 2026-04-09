@@ -193,16 +193,125 @@ def q_route_performance(cur, target_date: date = None):
     logger.info("route_performance: %d rows affected", cur.rowcount)
 
 
+def q_airport_nas_status(cur, target_date: date = None):
+    """Refresh ANALYTICS.AIRPORT_NAS_STATUS from RAW.FAA_NAS_STATUS_RAW."""
+    # Idempotent DDL — safe to run on every refresh in case setup.sql was not executed
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ANALYTICS.AIRPORT_NAS_STATUS (
+            FETCH_DATE         DATE,
+            IATA_CODE          VARCHAR(5),
+            DELAY_PROGRAMS     INTEGER,
+            MAX_AVG_DELAY_MIN  INTEGER,
+            HAS_GROUND_DELAY   BOOLEAN,
+            HAS_GROUND_STOP    BOOLEAN,
+            PRIMARY KEY (FETCH_DATE, IATA_CODE)
+        )
+    """)
+    cur.execute("""
+        INSERT OVERWRITE INTO ANALYTICS.AIRPORT_NAS_STATUS
+        SELECT
+            FETCH_DATE,
+            IATA_CODE,
+            COUNT(DISTINCT DELAY_TYPE)             AS DELAY_PROGRAMS,
+            MAX(AVG_DELAY_MIN)                     AS MAX_AVG_DELAY_MIN,
+            BOOLOR_AGG(DELAY_TYPE = 'GroundDelay') AS HAS_GROUND_DELAY,
+            BOOLOR_AGG(DELAY_TYPE = 'GroundStop')  AS HAS_GROUND_STOP
+        FROM RAW.FAA_NAS_STATUS_RAW
+        WHERE HAS_DELAY = TRUE
+          AND FETCH_DATE IS NOT NULL
+          AND IATA_CODE  IS NOT NULL
+        GROUP BY FETCH_DATE, IATA_CODE
+    """)
+    logger.info("airport_nas_status: %d rows affected", cur.rowcount)
+
+
+def q_weather_delay_correlation(cur, target_date: date = None):
+    """Refresh weather-delay correlation analytics table.
+
+    Skipped when STAGING.FLIGHTS does not yet have the ORIGIN_TEMP_C column
+    (i.e. setup.sql ALTER TABLE statements have not been run) or when no rows
+    with non-null ORIGIN_TEMP_C exist (weather join not applied yet).
+    """
+    # Guard step 1: check the column exists (ALTER TABLE may not have been run)
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'STAGING'
+          AND TABLE_NAME   = 'FLIGHTS'
+          AND COLUMN_NAME  = 'ORIGIN_TEMP_C'
+    """)
+    col_row = cur.fetchone()
+    if not col_row or col_row[0] == 0:
+        logger.warning(
+            "q_weather_delay_correlation: ORIGIN_TEMP_C column not found in "
+            "STAGING.FLIGHTS — run the ALTER TABLE statements in setup.sql first"
+        )
+        return
+
+    # Guard step 2: check that joined weather rows actually exist
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM STAGING.FLIGHTS
+        WHERE ORIGIN_TEMP_C IS NOT NULL
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    if not row or row[0] == 0:
+        logger.warning(
+            "q_weather_delay_correlation: STAGING.FLIGHTS has no rows with "
+            "non-null ORIGIN_TEMP_C — skipping (run weather join first)"
+        )
+        return
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ANALYTICS.WEATHER_DELAY_CORRELATION (
+            YEAR                INTEGER,
+            MONTH               INTEGER,
+            IATA_CODE           VARCHAR(5),
+            AVG_TEMP_C          FLOAT,
+            AVG_WIND_SPEED_KMH  FLOAT,
+            AVG_VISIBILITY_M    FLOAT,
+            SNOW_FLIGHT_COUNT   INTEGER,
+            AVG_DEP_DELAY_MIN   FLOAT,
+            DELAY_RATE          FLOAT,
+            PRIMARY KEY (YEAR, MONTH, IATA_CODE)
+        ) CLUSTER BY (YEAR, IATA_CODE)
+    """)
+    cur.execute("""
+        INSERT OVERWRITE INTO ANALYTICS.WEATHER_DELAY_CORRELATION
+        SELECT
+            f.YEAR,
+            f.MONTH,
+            f.ORIGIN                                              AS IATA_CODE,
+            AVG(f.ORIGIN_TEMP_C)                                 AS AVG_TEMP_C,
+            AVG(f.ORIGIN_WIND_SPEED_KMH)                         AS AVG_WIND_SPEED_KMH,
+            AVG(f.ORIGIN_VISIBILITY_M)                           AS AVG_VISIBILITY_M,
+            SUM(CASE WHEN f.ORIGIN_SNOWFALL_CM > 0 THEN 1 ELSE 0 END) AS SNOW_FLIGHT_COUNT,
+            AVG(f.DEP_DELAY_MIN)                                 AS AVG_DEP_DELAY_MIN,
+            AVG(CASE WHEN f.IS_CANCELLED = FALSE
+                     THEN f.IS_DEP_DELAYED::INTEGER END)          AS DELAY_RATE
+        FROM STAGING.FLIGHTS f
+        WHERE f.IS_CANCELLED = FALSE
+          AND f.ORIGIN_TEMP_C IS NOT NULL
+        GROUP BY f.YEAR, f.MONTH, f.ORIGIN
+    """)
+    logger.info("weather_delay_correlation: %d rows affected", cur.rowcount)
+
+
 QUERY_MAP = {
     "delay_trends":   [q_delay_trends_monthly, q_delay_trends_daily],
     "airline":        [q_airline_performance],
     "airports":       [q_airport_stats],
     "delay_causes":   [q_delay_cause_breakdown],
     "routes":         [q_route_performance],
+    "nas_status":     [q_airport_nas_status],
+    "weather":        [q_weather_delay_correlation],
     "all":            [
         q_delay_trends_monthly, q_delay_trends_daily,
         q_airline_performance, q_airport_stats,
         q_delay_cause_breakdown, q_route_performance,
+        q_airport_nas_status,
+        q_weather_delay_correlation,
     ],
 }
 

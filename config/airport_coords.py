@@ -1,0 +1,61 @@
+"""
+Airport coordinates and timezones for the 50 US airports in the flight delay project.
+Maps IATA code → (latitude, longitude, timezone_string).
+"""
+
+AIRPORT_COORDS: dict[str, tuple[float, float, str]] = {
+    "ATL": (33.6407, -84.4277, "America/New_York"),
+    "DFW": (32.8998, -97.0403, "America/Chicago"),
+    "DEN": (39.8561, -104.6737, "America/Denver"),
+    "ORD": (41.9742, -87.9073, "America/Chicago"),
+    "LAX": (33.9425, -118.4081, "America/Los_Angeles"),
+    "CLT": (35.2140, -80.9431, "America/New_York"),
+    "LAS": (36.0840, -115.1537, "America/Los_Angeles"),
+    "PHX": (33.4373, -112.0078, "America/Phoenix"),
+    "MCO": (28.4312, -81.3081, "America/New_York"),
+    "SEA": (47.4502, -122.3088, "America/Los_Angeles"),
+    "MIA": (25.7959, -80.2870, "America/New_York"),
+    "IAH": (29.9902, -95.3368, "America/Chicago"),
+    "JFK": (40.6413, -73.7781, "America/New_York"),
+    "EWR": (40.6895, -74.1745, "America/New_York"),
+    "MSP": (44.8848, -93.2223, "America/Chicago"),
+    "BOS": (42.3656, -71.0096, "America/New_York"),
+    "DTW": (42.2162, -83.3554, "America/Detroit"),
+    "PHL": (39.8729, -75.2437, "America/New_York"),
+    "LGA": (40.7772, -73.8726, "America/New_York"),
+    "FLL": (26.0726, -80.1527, "America/New_York"),
+    "BWI": (39.1754, -76.6682, "America/New_York"),
+    "DCA": (38.8521, -77.0377, "America/New_York"),
+    "MDW": (41.7868, -87.7522, "America/Chicago"),
+    "SFO": (37.6213, -122.3790, "America/Los_Angeles"),
+    "SLC": (40.7884, -111.9778, "America/Denver"),
+    "IAD": (38.9531, -77.4565, "America/New_York"),
+    "SAN": (32.7338, -117.1933, "America/Los_Angeles"),
+    "TPA": (27.9755, -82.5332, "America/New_York"),
+    "PDX": (45.5898, -122.5951, "America/Los_Angeles"),
+    "HOU": (29.6454, -95.2789, "America/Chicago"),
+    "STL": (38.7499, -90.3748, "America/Chicago"),
+    "BNA": (36.1245, -86.6782, "America/Chicago"),
+    "OAK": (37.7213, -122.2208, "America/Los_Angeles"),
+    "MCI": (39.2976, -94.7139, "America/Chicago"),
+    "SMF": (38.6954, -121.5908, "America/Los_Angeles"),
+    "RDU": (35.8776, -78.7875, "America/New_York"),
+    "SJC": (37.3626, -121.9290, "America/Los_Angeles"),
+    "MSY": (29.9934, -90.2580, "America/Chicago"),
+    "SAT": (29.5337, -98.4698, "America/Chicago"),
+    "CLE": (41.4117, -81.8498, "America/New_York"),
+    "CVG": (39.0488, -84.6678, "America/New_York"),
+    "PIT": (40.4915, -80.2329, "America/New_York"),
+    "CMH": (39.9980, -82.8919, "America/New_York"),
+    "IND": (39.7173, -86.2944, "America/Indiana/Indianapolis"),
+    "MKE": (42.9472, -87.8966, "America/Chicago"),
+    "AUS": (30.1975, -97.6664, "America/Chicago"),
+    "OGG": (20.8986, -156.4305, "Pacific/Honolulu"),
+    "HNL": (21.3245, -157.9251, "Pacific/Honolulu"),
+    "ANC": (61.1743, -149.9963, "America/Anchorage"),
+    "SNA": (33.6757, -117.8682, "America/Los_Angeles"),
+}
+
+
+def get_airport_coords(iata: str) -> tuple[float, float, str] | None:
+    return AIRPORT_COORDS.get(iata.upper())

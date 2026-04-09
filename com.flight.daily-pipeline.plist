@@ -7,12 +7,11 @@
     <key>Label</key>
     <string>com.flight.daily-pipeline</string>
 
-    <!-- Command to run -->
+    <!-- Command to run: FAA NAS fetch + analytics refresh (OpenSky disabled) -->
     <key>ProgramArguments</key>
     <array>
         <string>/Users/kaikai/Documents/WashU/2026Spring/CSE-5114/Final/code/.venv/bin/python</string>
         <string>/Users/kaikai/Documents/WashU/2026Spring/CSE-5114/Final/code/pipeline/daily_pipeline.py</string>
-        <string>--states-only</string>
     </array>
 
     <!-- Working directory (so .env is found) -->

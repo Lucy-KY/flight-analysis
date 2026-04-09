@@ -237,7 +237,115 @@ with DAG(
         """)
         print("COPY INTO OPENSKY_FLIGHTS_RAW done.")
 
-    # ── Task 4: Refresh analytics tables ─────────────────────────────────────
+    # ── Task 4: Fetch FAA NAS status ──────────────────────────────────────────
+    @task(task_id="fetch_faa_nas")
+    def fetch_faa_nas_task(**context):
+        """
+        Call FAA NAS aggregate endpoint (with per-airport fallback).
+        Saves raw JSON snapshot to WORK_DIR/data/faa_nas/{date}/snapshot.json.
+        Returns the snapshot directory path for downstream tasks.
+        """
+        import subprocess
+        import sys as _sys
+
+        target = context["data_interval_start"].date() - timedelta(days=1)
+        date_str = target.strftime("%Y-%m-%d")
+        out_dir  = os.path.join(WORK_DIR, "raw_data")
+
+        result = subprocess.run(
+            [
+                _sys.executable,
+                os.path.join(WORK_DIR, "ingestion", "faa_nas_fetcher.py"),
+                "--date",   date_str,
+                "--output", out_dir,
+            ],
+            cwd=WORK_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout:
+            print(result.stdout)
+        if result.returncode != 0:
+            print(f"STDERR: {result.stderr}")
+            raise RuntimeError(f"FAA NAS fetch failed (exit {result.returncode}): {result.stderr}")
+
+        snap_path = os.path.join(out_dir, "faa_nas", date_str, "snapshot.json")
+        print(f"FAA NAS snapshot saved → {snap_path}")
+        return snap_path
+
+    # ── Task 5: Spark-clean FAA NAS snapshot ──────────────────────────────────
+    @task(task_id="clean_faa_nas")
+    def clean_faa_nas_task(snap_path: str, **context):
+        """
+        Run PySpark to clean the FAA NAS JSON snapshot and write Parquet.
+        Returns path to output parquet directory.
+        """
+        import subprocess
+        import sys as _sys
+
+        target   = context["data_interval_start"].date() - timedelta(days=1)
+        date_str = target.strftime("%Y-%m-%d")
+
+        raw_dir     = os.path.join(WORK_DIR, "raw_data")
+        cleaned_dir = os.path.join(WORK_DIR, "cleaned_data")
+
+        result = subprocess.run(
+            [
+                _sys.executable,
+                os.path.join(WORK_DIR, "processing", "spark_clean_faa_nas.py"),
+                "--input-dir",  raw_dir,
+                "--output-dir", cleaned_dir,
+                "--date",       date_str,
+            ],
+            cwd=WORK_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout:
+            print(result.stdout)
+        if result.returncode != 0:
+            print(f"STDERR: {result.stderr}")
+            raise RuntimeError(f"FAA NAS Spark clean failed (exit {result.returncode}): {result.stderr}")
+
+        out_dir = os.path.join(cleaned_dir, "faa_nas")
+        print(f"FAA NAS cleaned data → {out_dir}")
+        return out_dir
+
+    # ── Task 6: Load FAA NAS Parquet → Snowflake ─────────────────────────────
+    @task(task_id="load_faa_nas")
+    def load_faa_nas_task(parquet_dir: str, **context):
+        """
+        PUT cleaned FAA NAS Parquet files to Snowflake internal stage,
+        then COPY INTO RAW.FAA_NAS_STATUS_RAW.
+        Uses SnowflakeHook (same pattern as load_snowflake task).
+        """
+        import glob
+
+        hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
+
+        parquet_files = glob.glob(os.path.join(parquet_dir, "**", "*.parquet"), recursive=True)
+        if not parquet_files:
+            print(f"No parquet files found in {parquet_dir}, skipping FAA NAS load.")
+            return
+
+        for pf in parquet_files:
+            hook.run(
+                f"PUT 'file://{pf}' @FLIGHT_DB.RAW.FAA_NAS_STAGE "
+                f"AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
+            )
+            print(f"  PUT: {os.path.basename(pf)}")
+
+        hook.run("""
+            COPY INTO FLIGHT_DB.RAW.FAA_NAS_STATUS_RAW
+            FROM @FLIGHT_DB.RAW.FAA_NAS_STAGE
+            FILE_FORMAT = (TYPE = PARQUET)
+            MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+            PURGE = TRUE
+            ON_ERROR = CONTINUE
+        """)
+        print("COPY INTO FAA_NAS_STATUS_RAW done.")
+
+    # ── Task 7: Refresh analytics tables ─────────────────────────────────────
     @task(task_id="run_analytics")
     def run_analytics(**context):
         """
@@ -389,6 +497,17 @@ with DAG(
         print(f"All analytics refreshed for {year}-{month:02d}.")
 
     # ── Task dependencies ─────────────────────────────────────────────────────
+    # OpenSky chain
     json_path    = fetch_opensky()
     parquet_path = spark_clean(json_path)
-    load_snowflake(parquet_path) >> run_analytics()
+    load_task    = load_snowflake(parquet_path)
+
+    # FAA NAS chain (runs in parallel with OpenSky chain)
+    snap_path     = fetch_faa_nas_task()
+    nas_clean_dir = clean_faa_nas_task(snap_path)
+    nas_load_task = load_faa_nas_task(nas_clean_dir)
+
+    # Analytics runs after BOTH chains complete
+    analytics_task = run_analytics()
+    load_task      >> analytics_task
+    nas_load_task  >> analytics_task

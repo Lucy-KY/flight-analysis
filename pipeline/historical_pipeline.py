@@ -1,25 +1,3 @@
-"""
-Historical BTS Pipeline (One-Time Bulk Load)
-=============================================
-Orchestrates: Download → Spark Clean → Upload to Snowflake
-
-Steps:
-  1. Download all BTS ZIP files (2000-2025) if not already present
-  2. Clean each file with PySpark → write staging Parquet
-  3. PUT parquet files to Snowflake internal stage
-  4. COPY INTO Snowflake tables
-
-Usage:
-    # Full historical load (all years):
-    python historical_pipeline.py --start 2000-01 --end 2025-12
-
-    # Resume / incremental (already-downloaded files are skipped):
-    python historical_pipeline.py --start 2020-01 --end 2024-12
-
-    # Dry run (download + clean only, no Snowflake upload):
-    python historical_pipeline.py --start 2024-01 --end 2024-03 --dry-run
-"""
-
 import argparse
 import logging
 import os
@@ -50,7 +28,6 @@ SCRIPTS_DIR  = BASE_DIR
 
 
 def step_download(start: str, end: str, workers: int = 2):
-    """Download BTS ZIP files using existing download script."""
     logger.info("=" * 60)
     logger.info("STEP 1: Downloading BTS data %s → %s", start, end)
     logger.info("=" * 60)
@@ -72,7 +49,6 @@ def step_download(start: str, end: str, workers: int = 2):
 
 
 def step_clean(start: str, end: str):
-    """Run Spark cleaning for date range."""
     logger.info("=" * 60)
     logger.info("STEP 2: Spark cleaning %s → %s", start, end)
     logger.info("=" * 60)
@@ -84,7 +60,6 @@ def step_clean(start: str, end: str):
         "--output", str(CLEANED_DIR),
     ]
 
-    # Filter by year range if specified
     start_year = int(start.split("-")[0])
     end_year   = int(end.split("-")[0])
     if start_year == end_year:
@@ -99,7 +74,6 @@ def step_clean(start: str, end: str):
 
 
 def step_load_snowflake(dry_run: bool = False):
-    """Upload cleaned Parquet to Snowflake via PUT + COPY INTO."""
     logger.info("=" * 60)
     logger.info("STEP 3: Loading to Snowflake")
     logger.info("=" * 60)
@@ -108,9 +82,6 @@ def step_load_snowflake(dry_run: bool = False):
         logger.info("[DRY RUN] Skipping Snowflake load")
         return
 
-    # Load from the RAW parquet (column names match BTS_ONTIME_RAW exactly).
-    # The STAGING parquet uses renamed columns (IS_CANCELLED, DEP_DELAY_MIN, …)
-    # and is NOT used here — STAGING.FLIGHTS is populated later via SQL INSERT.
     raw_parquet_dir = CLEANED_DIR / "raw"
     if not raw_parquet_dir.exists():
         logger.error("Raw parquet dir not found: %s", raw_parquet_dir)
@@ -141,14 +112,10 @@ def step_load_snowflake(dry_run: bool = False):
 
             logger.info("Uploading %s (%d files)", parquet_dir.name, len(part_files))
 
-            # PUT each parquet file to internal stage
             for pf in part_files:
                 put_sql = f"PUT 'file://{pf}' @RAW.BTS_STAGE AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
                 cur.execute(put_sql)
 
-            # COPY INTO raw table from stage
-            # Note: cannot use explicit column list together with MATCH_BY_COLUMN_NAME
-            # Parquet column names already match table columns (renamed in Spark)
             copy_sql = """
                 COPY INTO RAW.BTS_ONTIME_RAW
                 FROM @RAW.BTS_STAGE
@@ -162,8 +129,6 @@ def step_load_snowflake(dry_run: bool = False):
             logger.info("  Loaded: %s", rows)
             total_loaded += 1
 
-        # Populate STAGING.FLIGHTS from RAW using INSERT OVERWRITE (full refresh)
-        # Avoid correlated subqueries on 150M rows - use direct INSERT instead
         logger.info("Populating STAGING.FLIGHTS from RAW...")
         cur.execute("TRUNCATE TABLE STAGING.FLIGHTS")
         staging_sql = """
@@ -226,7 +191,6 @@ def main():
     parser.add_argument("--workers",  type=int, default=2,  help="Download threads")
     args = parser.parse_args()
 
-    # Load .env if present
     env_file = BASE_DIR / ".env"
     if env_file.exists():
         from dotenv import load_dotenv
