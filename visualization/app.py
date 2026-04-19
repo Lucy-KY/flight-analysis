@@ -38,7 +38,7 @@ Washington University in St. Louis
 ---
 **Data Sources**
 - BTS On-Time Performance (2000–2025)
-- OpenSky Network API (daily)
+- FAA NAS Status (daily)
 
 **Warehouse**
 Snowflake · FLIGHT_DB
@@ -49,7 +49,7 @@ Snowflake · FLIGHT_DB
 st.title("✈️ U.S. Flight Delay & Traffic Pattern Analysis")
 st.markdown(
     "Interactive dashboard powered by **25 years** of BTS historical data "
-    "and daily live feeds from the OpenSky Network."
+    "and daily FAA NAS live status feeds."
 )
 
 # ── Readiness check ───────────────────────────────────────────────────────────
@@ -179,6 +179,6 @@ except Exception as e:
     st.error(f"Could not load seasonal data: {e}")
 
 st.caption(
-    "Data: BTS On-Time Performance (2000–2025) + OpenSky Network. "
+    "Data: BTS On-Time Performance (2000–2025) + FAA NAS Status. "
     "Dashboard: CSE-5114 Final Project, Spring 2026."
 )

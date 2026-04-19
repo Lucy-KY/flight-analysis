@@ -2,18 +2,18 @@
 Flight Daily Pipeline DAG
 ==========================
 Runs every day at 06:00 to:
-  1. Fetch previous day's flight data from OpenSky Network API
+  1. Fetch FAA NAS status snapshot for the previous day
   2. Clean with PySpark
-  3. Load cleaned data into Snowflake (RAW + STAGING)
-  4. Refresh all ANALYTICS tables
+  3. Load cleaned data into Snowflake (RAW.FAA_NAS_STATUS_RAW)
+  4. Refresh all ANALYTICS tables (sourced from BTS STAGING.FLIGHTS)
 
 Deploy: copy this file to /home/compute/kaiyuanx/airflow25/dags/
 Requires: snowflake_default connection configured in Airflow (same as Assignment3)
 """
 
-import json
 import os
-import tempfile
+import subprocess
+import sys as _sys
 from datetime import datetime, timedelta, date
 
 from airflow import DAG
@@ -22,233 +22,40 @@ from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SNOWFLAKE_CONN_ID = "snowflake_default"
-OPENSKY_BASE      = "https://opensky-network.org/api"
-OPENSKY_USER      = os.getenv("OPENSKY_USERNAME", "")
-OPENSKY_PASS      = os.getenv("OPENSKY_PASSWORD", "")
 
 # Working directory on the school server (same style as Assignment4)
 WORK_DIR = "/home/compute/kaiyuanx/airflow25"
 
-# Top 30 busiest US airports (ICAO codes) — balance coverage vs API quota
-US_AIRPORTS = [
-    "KATL", "KDFW", "KDEN", "KORD", "KLAX",
-    "KJFK", "KLAS", "KMCO", "KMIA", "KCLT",
-    "KSEA", "KPHX", "KEWR", "KSFO", "KIAH",
-    "KBOS", "KFLL", "KMSP", "KLGA", "KBWI",
-    "KDTW", "KPHL", "KSLC", "KDCA", "KIAD",
-    "KMDW", "KSAN", "KTPA", "KPDX", "KBNA",
-]
-
-# ── Default args (same style as Assignment4) ──────────────────────────────────
+# ── Default args ──────────────────────────────────────────────────────────────
 default_args = {
-    "owner":             "kaiyuanx",
-    "depends_on_past":   False,
-    "start_date":        datetime(2025, 4, 1),
-    "email_on_failure":  False,
-    "email_on_retry":    False,
-    "retries":           2,
-    "retry_delay":       timedelta(minutes=10),
+    "owner":            "kaiyuanx",
+    "depends_on_past":  False,
+    "start_date":       datetime(2025, 4, 1),
+    "email_on_failure": False,
+    "email_on_retry":   False,
+    "retries":          2,
+    "retry_delay":      timedelta(minutes=10),
 }
 
 # ── DAG ───────────────────────────────────────────────────────────────────────
 with DAG(
     dag_id="flight_daily_pipeline",
     default_args=default_args,
-    description="Daily US flight data: OpenSky fetch → Spark clean → Snowflake load → Analytics",
-    schedule="0 6 * * *",   # every day at 06:00
+    description="Daily FAA NAS fetch → Spark clean → Snowflake load → Analytics refresh",
+    schedule="0 6 * * *",
     catchup=False,
-    tags=["flight", "opensky", "snowflake", "spark"],
+    tags=["flight", "faa-nas", "snowflake", "spark"],
 ) as dag:
 
-    # ── Task 1: Fetch OpenSky flight data ─────────────────────────────────────
-    @task(task_id="fetch_opensky")
-    def fetch_opensky(**context):
-        """
-        Call OpenSky /flights/departure for each US airport.
-        Save raw JSON to a temp file; return the path for downstream tasks.
-        """
-        import requests
-        import time
-
-        # Target date = yesterday (data_interval_start gives the logical run date)
-        target = context["data_interval_start"].date() - timedelta(days=1)
-        date_str = target.strftime("%Y-%m-%d")
-
-        dt_start = datetime(target.year, target.month, target.day, 0, 0, 0)
-        dt_end   = datetime(target.year, target.month, target.day, 23, 59, 59)
-        begin_ts = int(dt_start.timestamp())
-        end_ts   = int(dt_end.timestamp())
-
-        session = requests.Session()
-        if OPENSKY_USER:
-            session.auth = (OPENSKY_USER, OPENSKY_PASS)
-
-        all_flights = []
-        for airport in US_AIRPORTS:
-            for endpoint in ("departure", "arrival"):
-                try:
-                    time.sleep(1.0)   # stay within 400 req/hour free limit
-                    resp = session.get(
-                        f"{OPENSKY_BASE}/flights/{endpoint}",
-                        params={"airport": airport, "begin": begin_ts, "end": end_ts},
-                        timeout=30,
-                    )
-                    if resp.status_code == 200:
-                        flights = resp.json() or []
-                        for f in flights:
-                            f["fetch_date"]    = date_str
-                            f["fetch_airport"] = airport
-                            f["direction"]     = endpoint
-                        all_flights.extend(flights)
-                    elif resp.status_code == 404:
-                        pass   # no data for this airport/window
-                    else:
-                        print(f"  {airport}/{endpoint}: HTTP {resp.status_code}")
-                except Exception as e:
-                    print(f"  {airport}/{endpoint} error: {e}")
-
-        # Save to temp JSON file
-        out_dir = os.path.join(WORK_DIR, "data", "opensky", date_str)
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, "flights.json")
-        with open(out_path, "w") as f:
-            json.dump(all_flights, f)
-
-        print(f"Fetched {len(all_flights)} flights for {date_str} → {out_path}")
-        return out_path
-
-    # ── Task 2: Spark cleaning ────────────────────────────────────────────────
-    @task(task_id="spark_clean")
-    def spark_clean(json_path: str, **context):
-        """
-        Run PySpark to clean the OpenSky JSON and write Parquet.
-        Returns path to output parquet directory.
-        """
-        from pyspark.sql import SparkSession
-        from pyspark.sql import functions as F
-        from pyspark.sql.types import (
-            LongType, StringType, IntegerType, DoubleType,
-            BooleanType, StructType, StructField,
-        )
-
-        target = context["data_interval_start"].date() - timedelta(days=1)
-        date_str = target.strftime("%Y-%m-%d")
-
-        spark = (
-            SparkSession.builder
-            .appName("OpenSky_Clean_Daily")
-            .master("local[*]")
-            .config("spark.driver.memory", "2g")
-            .getOrCreate()
-        )
-        spark.sparkContext.setLogLevel("WARN")
-
-        schema = StructType([
-            StructField("icao24",                           StringType(),  True),
-            StructField("firstSeen",                        LongType(),    True),
-            StructField("estDepartureAirport",              StringType(),  True),
-            StructField("lastSeen",                         LongType(),    True),
-            StructField("estArrivalAirport",                StringType(),  True),
-            StructField("callsign",                         StringType(),  True),
-            StructField("estDepartureAirportHorizDistance", IntegerType(), True),
-            StructField("estDepartureAirportVertDistance",  IntegerType(), True),
-            StructField("estArrivalAirportHorizDistance",   IntegerType(), True),
-            StructField("estArrivalAirportVertDistance",    IntegerType(), True),
-            StructField("departureAirportCandidatesCount",  IntegerType(), True),
-            StructField("arrivalAirportCandidatesCount",    IntegerType(), True),
-            StructField("fetch_date",                       StringType(),  True),
-            StructField("fetch_airport",                    StringType(),  True),
-            StructField("direction",                        StringType(),  True),
-        ])
-
-        df = spark.read.schema(schema).json(json_path)
-
-        df = (
-            df
-            .dropDuplicates(["icao24", "firstSeen", "estDepartureAirport", "estArrivalAirport"])
-            .withColumn("FETCH_DATE",             F.to_date(F.col("fetch_date"), "yyyy-MM-dd"))
-            .withColumn("ICAO24",                 F.upper(F.trim(F.col("icao24"))))
-            .withColumn("CALLSIGN",               F.trim(F.col("callsign")))
-            .withColumn("FIRST_SEEN",             F.col("firstSeen"))
-            .withColumn("EST_DEPARTURE_AIRPORT",  F.upper(F.trim(F.col("estDepartureAirport"))))
-            .withColumn("LAST_SEEN",              F.col("lastSeen"))
-            .withColumn("EST_ARRIVAL_AIRPORT",    F.upper(F.trim(F.col("estArrivalAirport"))))
-            .withColumn("DEP_AIRPORT_HORIZ_DIST", F.col("estDepartureAirportHorizDistance"))
-            .withColumn("DEP_AIRPORT_VERT_DIST",  F.col("estDepartureAirportVertDistance"))
-            .withColumn("ARR_AIRPORT_HORIZ_DIST", F.col("estArrivalAirportHorizDistance"))
-            .withColumn("ARR_AIRPORT_VERT_DIST",  F.col("estArrivalAirportVertDistance"))
-            .withColumn("DEP_CANDIDATES_COUNT",   F.col("departureAirportCandidatesCount"))
-            .withColumn("ARR_CANDIDATES_COUNT",   F.col("arrivalAirportCandidatesCount"))
-            .withColumn("_LOAD_TS",               F.current_timestamp())
-            .filter(
-                F.col("EST_DEPARTURE_AIRPORT").isNotNull() |
-                F.col("EST_ARRIVAL_AIRPORT").isNotNull()
-            )
-            .select(
-                "FETCH_DATE", "ICAO24", "CALLSIGN",
-                "FIRST_SEEN", "EST_DEPARTURE_AIRPORT",
-                "LAST_SEEN",  "EST_ARRIVAL_AIRPORT",
-                "DEP_AIRPORT_HORIZ_DIST", "DEP_AIRPORT_VERT_DIST",
-                "ARR_AIRPORT_HORIZ_DIST", "ARR_AIRPORT_VERT_DIST",
-                "DEP_CANDIDATES_COUNT",   "ARR_CANDIDATES_COUNT",
-                "_LOAD_TS",
-            )
-        )
-
-        out_dir   = os.path.join(WORK_DIR, "data", "opensky_clean", date_str)
-        df.write.mode("overwrite").parquet(out_dir)
-        spark.stop()
-
-        print(f"Cleaned OpenSky data → {out_dir}")
-        return out_dir
-
-    # ── Task 3: Load to Snowflake (same style as Assignment3) ────────────────
-    @task(task_id="load_snowflake")
-    def load_snowflake(parquet_dir: str, **context):
-        """
-        PUT parquet files to Snowflake internal stage, then COPY INTO RAW table.
-        Uses SnowflakeHook (same as Assignment3).
-        """
-        import glob
-
-        hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
-
-        parquet_files = glob.glob(os.path.join(parquet_dir, "*.parquet"))
-        if not parquet_files:
-            print(f"No parquet files found in {parquet_dir}, skipping load.")
-            return
-
-        # PUT files to internal stage
-        for pf in parquet_files:
-            hook.run(
-                f"PUT 'file://{pf}' @FLIGHT_DB.RAW.OPENSKY_STAGE "
-                f"AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
-            )
-            print(f"  PUT: {os.path.basename(pf)}")
-
-        # COPY INTO raw table
-        hook.run("""
-            COPY INTO FLIGHT_DB.RAW.OPENSKY_FLIGHTS_RAW
-            FROM @FLIGHT_DB.RAW.OPENSKY_STAGE
-            FILE_FORMAT = (TYPE = PARQUET)
-            MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
-            PURGE = TRUE
-            ON_ERROR = CONTINUE
-        """)
-        print("COPY INTO OPENSKY_FLIGHTS_RAW done.")
-
-    # ── Task 4: Fetch FAA NAS status ──────────────────────────────────────────
+    # ── Task 1: Fetch FAA NAS status ──────────────────────────────────────────
     @task(task_id="fetch_faa_nas")
     def fetch_faa_nas_task(**context):
         """
         Call FAA NAS aggregate endpoint (with per-airport fallback).
-        Saves raw JSON snapshot to WORK_DIR/data/faa_nas/{date}/snapshot.json.
-        Returns the snapshot directory path for downstream tasks.
+        Saves raw JSON snapshot to WORK_DIR/raw_data/faa_nas/{date}/snapshot.json.
+        Returns the snapshot path for downstream tasks.
         """
-        import subprocess
-        import sys as _sys
-
-        target = context["data_interval_start"].date() - timedelta(days=1)
+        target   = context["data_interval_start"].date() - timedelta(days=1)
         date_str = target.strftime("%Y-%m-%d")
         out_dir  = os.path.join(WORK_DIR, "raw_data")
 
@@ -273,16 +80,13 @@ with DAG(
         print(f"FAA NAS snapshot saved → {snap_path}")
         return snap_path
 
-    # ── Task 5: Spark-clean FAA NAS snapshot ──────────────────────────────────
+    # ── Task 2: Spark-clean FAA NAS snapshot ──────────────────────────────────
     @task(task_id="clean_faa_nas")
     def clean_faa_nas_task(snap_path: str, **context):
         """
         Run PySpark to clean the FAA NAS JSON snapshot and write Parquet.
         Returns path to output parquet directory.
         """
-        import subprocess
-        import sys as _sys
-
         target   = context["data_interval_start"].date() - timedelta(days=1)
         date_str = target.strftime("%Y-%m-%d")
 
@@ -311,13 +115,12 @@ with DAG(
         print(f"FAA NAS cleaned data → {out_dir}")
         return out_dir
 
-    # ── Task 6: Load FAA NAS Parquet → Snowflake ─────────────────────────────
+    # ── Task 3: Load FAA NAS Parquet → Snowflake ─────────────────────────────
     @task(task_id="load_faa_nas")
     def load_faa_nas_task(parquet_dir: str, **context):
         """
         PUT cleaned FAA NAS Parquet files to Snowflake internal stage,
         then COPY INTO RAW.FAA_NAS_STATUS_RAW.
-        Uses SnowflakeHook (same pattern as load_snowflake task).
         """
         import glob
 
@@ -345,19 +148,19 @@ with DAG(
         """)
         print("COPY INTO FAA_NAS_STATUS_RAW done.")
 
-    # ── Task 7: Refresh analytics tables ─────────────────────────────────────
+    # ── Task 4: Refresh analytics tables ─────────────────────────────────────
     @task(task_id="run_analytics")
     def run_analytics(**context):
         """
-        Refresh all ANALYTICS schema tables for the current month.
-        Uses SnowflakeHook (same as Assignment3).
+        Refresh all ANALYTICS schema tables.
+        All queries source from STAGING.FLIGHTS (BTS data).
         """
         hook   = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
         target = context["data_interval_start"].date() - timedelta(days=1)
         year, month = target.year, target.month
 
         analytics_sqls = {
-            "delay_trends_monthly": f"""
+            "delay_trends_monthly": """
                 INSERT OVERWRITE INTO FLIGHT_DB.ANALYTICS.DELAY_TRENDS_MONTHLY
                 SELECT
                     YEAR, MONTH,
@@ -382,7 +185,7 @@ with DAG(
                 GROUP BY YEAR, MONTH
             """,
 
-            "delay_trends_daily": f"""
+            "delay_trends_daily": """
                 INSERT OVERWRITE INTO FLIGHT_DB.ANALYTICS.DELAY_TRENDS_DAILY
                 SELECT
                     FLIGHT_DATE,
@@ -497,17 +300,8 @@ with DAG(
         print(f"All analytics refreshed for {year}-{month:02d}.")
 
     # ── Task dependencies ─────────────────────────────────────────────────────
-    # OpenSky chain
-    json_path    = fetch_opensky()
-    parquet_path = spark_clean(json_path)
-    load_task    = load_snowflake(parquet_path)
-
-    # FAA NAS chain (runs in parallel with OpenSky chain)
     snap_path     = fetch_faa_nas_task()
     nas_clean_dir = clean_faa_nas_task(snap_path)
     nas_load_task = load_faa_nas_task(nas_clean_dir)
-
-    # Analytics runs after BOTH chains complete
     analytics_task = run_analytics()
-    load_task      >> analytics_task
-    nas_load_task  >> analytics_task
+    nas_load_task >> analytics_task

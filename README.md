@@ -1,227 +1,316 @@
-# U.S. Flight Delay & Traffic Pattern Analysis
-**CSE 5114 Final Project** | Yiyang Sun · Kaiyuan Xu
+# U.S. Flight Delay, Weather, and NAS Analysis
 
----
+End-to-end data engineering and analytics project for U.S. flight operations. The repository combines historical BTS flight data, daily OpenSky flight data, FAA NAS airport-status snapshots, and airport weather data, then loads everything into Snowflake for analytics, dashboarding, and delay prediction.
 
-## Project Overview
+## What This Project Does
 
-An end-to-end data engineering pipeline that:
-- Ingests **25 years** (2000–2025) of BTS airline on-time performance data (~150M records, >128 GB)
-- Performs **daily incremental updates** from the OpenSky Network free API
-- Cleans and transforms data using **PySpark** (local mode)
-- Stores everything in **Snowflake** with a layered data model (RAW → STAGING → ANALYTICS)
-- Runs **scheduled analytics** queries automatically each morning
+- Downloads historical BTS On-Time Performance data.
+- Fetches daily OpenSky flight data.
+- Fetches FAA NAS airport delay-status snapshots.
+- Fetches historical airport weather from Open-Meteo.
+- Cleans raw data with PySpark and writes Parquet.
+- Loads cleaned data into Snowflake using a layered model:
+  `RAW -> STAGING -> ANALYTICS`
+- Exposes results through:
+  - scheduled pipelines
+  - an Airflow DAG
+  - a Streamlit dashboard
+  - an XGBoost-based delay predictor
 
----
+## Data Sources
 
-## Data Flow Architecture
+- BTS PREZIP server: historical U.S. flight performance data
+- OpenSky Network API: flight departures, arrivals, and flight-state snapshots
+- FAA NAS Status API: airport delay programs and operational constraints
+- Open-Meteo Archive API: hourly airport weather
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        DATA SOURCES                                          │
-│                                                                              │
-│  ┌──────────────────────────┐    ┌──────────────────────────────────────┐   │
-│  │  BTS PREZIP Server        │    │  OpenSky Network REST API (FREE)      │   │
-│  │  transtats.bts.gov        │    │  opensky-network.org/api              │   │
-│  │  Historical: 2000-2025    │    │  Daily: departures/arrivals           │   │
-│  │  ~310 ZIP files           │    │  Top 50 US airports                   │   │
-│  │  ~135 GB uncompressed     │    │  Real-time + 30-day history           │   │
-│  └────────────┬─────────────┘    └───────────────────┬──────────────────┘   │
-└───────────────┼──────────────────────────────────────┼──────────────────────┘
-                │ (one-time)                            │ (daily @ 06:00)
-                ▼                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        INGESTION LAYER                                       │
-│                                                                              │
-│  ┌─────────────────────────────┐    ┌──────────────────────────────────┐    │
-│  │  download_bts_data.py        │    │  ingestion/opensky_fetcher.py     │    │
-│  │  • Multi-threaded HTTP DL   │    │  • Authenticated REST API         │    │
-│  │  • Resume on failure        │    │  • Rate-limited (1 req/s)         │    │
-│  │  • Output: raw_data/*.zip   │    │  • Output: raw_data/opensky/      │    │
-│  └────────────┬────────────────┘    └──────────────────┬───────────────┘    │
-└───────────────┼─────────────────────────────────────────┼────────────────────┘
-                │                                          │
-                ▼                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     PROCESSING LAYER (PySpark local[*])                      │
-│                                                                              │
-│  ┌────────────────────────────────┐  ┌───────────────────────────────────┐  │
-│  │  processing/spark_clean_bts.py  │  │  processing/spark_clean_opensky.py│  │
-│  │  • Unzip + read CSV             │  │  • Read JSON flight records        │  │
-│  │  • Rename 110 → clean columns   │  │  • Deduplicate (dep+arr overlap)   │  │
-│  │  • Cast types, nullify empties  │  │  • Filter US airspace              │  │
-│  │  • Derive FLIGHT_ID PK          │  │  • Convert Unix ts → dates         │  │
-│  │  • Write: cleaned_data/bts/     │  │  • Write: cleaned_data/opensky/    │  │
-│  │    ├── raw/  (all columns)      │  │    ├── flights/ (partitioned)      │  │
-│  │    └── staging/ (normalized)    │  │    └── states/  (snapshots)        │  │
-│  └────────────┬───────────────────┘  └─────────────────┬──────────────────┘  │
-└───────────────┼───────────────────────────────────────────┼──────────────────┘
-                │  PUT parquet → @BTS_STAGE                 │  PUT → @OPENSKY_STAGE
-                ▼                                           ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         SNOWFLAKE (FLIGHT_DB)                                │
-│                                                                              │
-│  ┌─────────────── RAW schema ──────────────────────────────────────────┐    │
-│  │  BTS_ONTIME_RAW          (clustered by YEAR, MONTH)  ~150M rows     │    │
-│  │  OPENSKY_STATES_RAW      (clustered by FETCH_DATE)   daily          │    │
-│  │  OPENSKY_FLIGHTS_RAW     (clustered by FETCH_DATE)   daily          │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                 │ INSERT INTO                                │
-│  ┌─────────────── STAGING schema ──────────────────────────────────────┐    │
-│  │  FLIGHTS  (primary analytical table)                                 │    │
-│  │  • FLIGHT_ID (PK), cleaned & normalized columns                      │    │
-│  │  • Clustered by (YEAR, MONTH, AIRLINE_CODE)                          │    │
-│  │  • Sources: BTS + OpenSky                                            │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                 │ Analytics queries                          │
-│  ┌─────────────── ANALYTICS schema ────────────────────────────────────┐    │
-│  │  DELAY_TRENDS_MONTHLY      – monthly delay KPIs (25yr trend)        │    │
-│  │  DELAY_TRENDS_DAILY        – daily delay monitoring                  │    │
-│  │  AIRLINE_PERFORMANCE       – per-airline on-time rates               │    │
-│  │  AIRPORT_STATS             – per-airport dep/arr statistics          │    │
-│  │  DELAY_CAUSE_BREAKDOWN     – carrier/weather/NAS/security/lateAC    │    │
-│  │  ROUTE_PERFORMANCE         – per-route delay metrics                 │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                 ▲
-                                 │
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     ORCHESTRATION (pipeline/)                                │
-│                                                                              │
-│  scheduler.py  ──► daily_pipeline.py ──► [fetch → clean → load → analytics] │
-│  (APScheduler, daily @ 06:00 Central)                                        │
-│                                                                              │
-│  historical_pipeline.py  (one-time, full BTS bulk load)                      │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+## Repository Structure
 
----
-
-## Directory Structure
-
-```
+```text
 code/
-├── download_bts_data.py          # BTS PREZIP bulk downloader
-├── requirements.txt              # Python dependencies
-├── .env.example                  # Credentials template (copy to .env)
+├── README.md
+├── requirements.txt
+├── download_bts_data.py
+├── com.flight.daily-pipeline.plist
+├── test.java
+│
+├── analysis/
+│   ├── __init__.py
+│   └── run_analytics.py
+│
+├── config/
+│   ├── airport_coords.py
+│   └── snowflake_conn.py
+│
+├── dags/
+│   └── flight_daily_pipeline.py
 │
 ├── ingestion/
-│   └── opensky_fetcher.py        # OpenSky daily API fetcher
+│   ├── __init__.py
+│   ├── faa_nas_fetcher.py
+│   ├── opensky_fetcher.py
+│   └── weather_fetcher.py
 │
-├── processing/
-│   ├── spark_clean_bts.py        # PySpark: clean BTS ZIP → Parquet
-│   └── spark_clean_opensky.py    # PySpark: clean OpenSky JSON → Parquet
-│
-├── snowflake/
-│   ├── setup.sql                 # DDL: warehouse, db, schemas, tables, stages
-│   └── analytics_queries.sql     # Analytics SQL (ad-hoc + scheduled)
+├── models/
+│   ├── __init__.py
+│   ├── predict.py
+│   └── train_delay_model.py
 │
 ├── pipeline/
-│   ├── historical_pipeline.py    # One-time BTS full load orchestrator
-│   ├── daily_pipeline.py         # Daily incremental update orchestrator
-│   └── scheduler.py              # APScheduler-based daily trigger
+│   ├── __init__.py
+│   ├── daily_pipeline.py
+│   ├── historical_pipeline.py
+│   ├── scheduler.py
+│   └── weather_pipeline.py
 │
-└── analysis/
-    └── run_analytics.py          # Analytics refresh runner
+├── processing/
+│   ├── __init__.py
+│   ├── spark_clean_bts.py
+│   ├── spark_clean_faa_nas.py
+│   ├── spark_clean_opensky.py
+│   └── spark_clean_weather.py
+│
+├── snowflake/
+│   ├── analytics_queries.sql
+│   └── setup.sql
+│
+└── visualization/
+    ├── app.py
+    ├── utils/
+    │   ├── __init__.py
+    │   └── db.py
+    └── pages/
+        ├── 1_Delay_Trends.py
+        ├── 2_Airline_Performance.py
+        ├── 3_Airport_Stats.py
+        ├── 4_Delay_Causes.py
+        ├── 5_Route_Performance.py
+        ├── 6_Live_NAS_Status.py
+        └── 7_Delay_Predictor.py
 ```
 
----
+## Main Components
 
-## Quick Start
+### Ingestion
 
-### 1. Prerequisites
+- `download_bts_data.py`
+  Downloads BTS ZIP files in bulk from the PREZIP endpoint.
+- `ingestion/opensky_fetcher.py`
+  Fetches OpenSky departure, arrival, and state-snapshot JSON.
+- `ingestion/faa_nas_fetcher.py`
+  Fetches FAA NAS airport status and delay-program snapshots.
+- `ingestion/weather_fetcher.py`
+  Fetches hourly weather history for major U.S. airports.
+
+### Processing
+
+- `processing/spark_clean_bts.py`
+  Cleans BTS ZIP/CSV data and writes Parquet for raw and staging layers.
+- `processing/spark_clean_opensky.py`
+  Cleans OpenSky JSON into Parquet flight and state datasets.
+- `processing/spark_clean_faa_nas.py`
+  Cleans FAA NAS JSON snapshots into Parquet.
+- `processing/spark_clean_weather.py`
+  Expands hourly weather arrays into one row per airport-hour.
+
+### Pipelines and Scheduling
+
+- `pipeline/historical_pipeline.py`
+  One-time historical BTS load orchestrator.
+- `pipeline/daily_pipeline.py`
+  Daily operational pipeline for OpenSky, FAA NAS, and analytics refresh.
+- `pipeline/weather_pipeline.py`
+  Weather-data bulk pipeline.
+- `pipeline/scheduler.py`
+  APScheduler-based local scheduler for daily runs.
+- `dags/flight_daily_pipeline.py`
+  Airflow DAG for daily orchestration.
+- `com.flight.daily-pipeline.plist`
+  macOS `launchd` job definition for background scheduling.
+
+### Snowflake and Analytics
+
+- `snowflake/setup.sql`
+  Creates warehouse, database, schemas, tables, and internal stages.
+- `snowflake/analytics_queries.sql`
+  Contains analytics refresh SQL and ad hoc analysis queries.
+- `analysis/run_analytics.py`
+  Executes analytics refresh queries against Snowflake.
+
+### Modeling and Prediction
+
+- `models/train_delay_model.py`
+  Trains XGBoost classification and regression models from `STAGING.FLIGHTS`.
+- `models/predict.py`
+  Loads trained models and predicts delay probability and expected delay.
+
+### Dashboard
+
+- `visualization/app.py`
+  Streamlit dashboard entry point.
+- `visualization/pages/`
+  Dashboard pages for trends, airlines, airports, delay causes, routes, live NAS status, and prediction.
+- `visualization/utils/db.py`
+  Cached Snowflake query helper for Streamlit pages.
+
+## Data Flow
+
+### Historical Flight Data
+
+1. `download_bts_data.py` downloads raw BTS ZIP files.
+2. `processing/spark_clean_bts.py` cleans and normalizes the data.
+3. `pipeline/historical_pipeline.py` uploads Parquet to Snowflake.
+4. Data lands in `RAW.BTS_ONTIME_RAW` and is used to populate `STAGING.FLIGHTS`.
+
+### Daily Flight and NAS Data
+
+1. `ingestion/opensky_fetcher.py` fetches daily flight data.
+2. `ingestion/faa_nas_fetcher.py` fetches FAA NAS airport-status snapshots.
+3. Spark cleaning scripts write cleaned Parquet.
+4. `pipeline/daily_pipeline.py` loads the results into Snowflake.
+5. `analysis/run_analytics.py` refreshes analytics tables.
+
+### Weather Data
+
+1. `ingestion/weather_fetcher.py` fetches airport weather history.
+2. `processing/spark_clean_weather.py` transforms it into hourly rows.
+3. `pipeline/weather_pipeline.py` loads it into `RAW.AIRPORT_WEATHER_HOURLY`.
+
+## Snowflake Layout
+
+### `RAW`
+
+Raw or lightly standardized ingested data:
+
+- `RAW.BTS_ONTIME_RAW`
+- `RAW.OPENSKY_STATES_RAW`
+- `RAW.OPENSKY_FLIGHTS_RAW`
+- `RAW.FAA_NAS_STATUS_RAW`
+- `RAW.AIRPORT_WEATHER_HOURLY`
+
+### `STAGING`
+
+Cleaned analytical base tables:
+
+- `STAGING.FLIGHTS`
+
+### `ANALYTICS`
+
+Aggregated or dashboard-facing tables:
+
+- `ANALYTICS.DELAY_TRENDS_DAILY`
+- `ANALYTICS.DELAY_TRENDS_MONTHLY`
+- `ANALYTICS.AIRLINE_PERFORMANCE`
+- `ANALYTICS.AIRPORT_STATS`
+- `ANALYTICS.DELAY_CAUSE_BREAKDOWN`
+- `ANALYTICS.ROUTE_PERFORMANCE`
+- `ANALYTICS.AIRPORT_NAS_STATUS`
+- `ANALYTICS.WEATHER_DELAY_CORRELATION`
+
+## Setup
+
+### Prerequisites
+
+- Python 3.10+
+- Java 11+ for PySpark
+- Snowflake account and RSA key-pair authentication configured
+
+### Install
 
 ```bash
-# Python 3.10+, Java 11+ (required for PySpark)
-brew install openjdk@11
-export JAVA_HOME=/opt/homebrew/opt/openjdk@11
-
 cd code
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your Snowflake credentials
 ```
 
-### 2. Initialize Snowflake
+### Environment Variables
 
-Run `snowflake/setup.sql` in your Snowflake worksheet (as TRAINING_ROLE):
-```sql
--- Creates: FLIGHT_WH, FLIGHT_DB, schemas RAW/STAGING/ANALYTICS, all tables & stages
-```
-
-### 3. One-Time Historical Load (BTS 2000–2025)
+The code expects Snowflake credentials and other runtime settings via environment variables or a `.env` file. At minimum, configure:
 
 ```bash
-# Full 25-year load (~135 GB CSV, takes several hours)
-python pipeline/historical_pipeline.py --start 2000-01 --end 2025-12 --workers 2
+SNOWFLAKE_ACCOUNT=...
+SNOWFLAKE_USER=...
+SNOWFLAKE_PRIVATE_KEY_PATH=...
+SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=...
+SNOWFLAKE_WAREHOUSE=FLIGHT_WH
+SNOWFLAKE_DATABASE=FLIGHT_DB
+SNOWFLAKE_ROLE=TRAINING_ROLE
+OPENSKY_USERNAME=...
+OPENSKY_PASSWORD=...
+```
 
-# Test with 3 months first:
+## Typical Commands
+
+### Initialize Snowflake
+
+Run `snowflake/setup.sql` in Snowflake first.
+
+### Historical BTS Load
+
+```bash
+cd code
 python pipeline/historical_pipeline.py --start 2024-01 --end 2024-03 --workers 1
 ```
 
-This runs automatically: Download → Spark Clean → Snowflake Load → Analytics Refresh
-
-### 4. Start Daily Scheduler
+### Daily Pipeline
 
 ```bash
-# Runs daily at 06:00 Central time
+cd code
+python pipeline/daily_pipeline.py
+python pipeline/daily_pipeline.py --date 2026-04-08
+python pipeline/daily_pipeline.py --dry-run
+```
+
+### Weather Pipeline
+
+```bash
+cd code
+python pipeline/weather_pipeline.py --start-year 2024 --end-year 2025
+```
+
+### Run Analytics Only
+
+```bash
+cd code
+python analysis/run_analytics.py
+python analysis/run_analytics.py --date 2026-04-08
+```
+
+### Start Local Scheduler
+
+```bash
+cd code
 python pipeline/scheduler.py
-
-# Custom time:
-python pipeline/scheduler.py --hour 7 --minute 30
-
-# Run once immediately (for testing):
 python pipeline/scheduler.py --run-now
 ```
 
-### 5. Run Analytics Manually
+### Launch Dashboard
 
 ```bash
-# Refresh all analytics tables
-python analysis/run_analytics.py
-
-# Incremental refresh for a specific date
-python analysis/run_analytics.py --date 2025-04-02
-
-# Only airline stats
-python analysis/run_analytics.py --query airline
+cd code
+streamlit run visualization/app.py
 ```
 
----
+### Train Delay Models
 
-## Snowflake Schema Design
+```bash
+cd code
+python models/train_delay_model.py --sample-frac 0.1
+```
 
-### Layered Architecture
+## Dashboard Pages
 
-| Schema | Purpose | Tables |
-|--------|---------|--------|
-| `RAW` | Immutable raw ingested data | `BTS_ONTIME_RAW`, `OPENSKY_STATES_RAW`, `OPENSKY_FLIGHTS_RAW` |
-| `STAGING` | Cleaned, deduplicated, PK-assigned | `FLIGHTS` |
-| `ANALYTICS` | Aggregated results for visualization | 6 tables (see below) |
+- `1_Delay_Trends.py`: long-term and seasonal delay trends
+- `2_Airline_Performance.py`: airline comparison
+- `3_Airport_Stats.py`: airport-level traffic and delay metrics
+- `4_Delay_Causes.py`: carrier, weather, NAS, security, and late-aircraft causes
+- `5_Route_Performance.py`: route-level delay patterns
+- `6_Live_NAS_Status.py`: latest FAA NAS airport delay programs
+- `7_Delay_Predictor.py`: model-backed single-flight delay prediction
 
-### Analytics Tables
+## Notes
 
-| Table | Grain | Key Analysis |
-|-------|-------|-------------|
-| `DELAY_TRENDS_MONTHLY` | year+month | 25-year delay rate trend |
-| `DELAY_TRENDS_DAILY` | date | Real-time monitoring |
-| `AIRLINE_PERFORMANCE` | year+month+airline | Best/worst airlines |
-| `AIRPORT_STATS` | year+month+airport | Hub congestion analysis |
-| `DELAY_CAUSE_BREAKDOWN` | year+month | Carrier vs weather vs NAS |
-| `ROUTE_PERFORMANCE` | year+month+route | Most delay-prone routes |
-
-### Cost Controls
-- Warehouse: **X-Small**, auto-suspends after **60 seconds** idle
-- Estimated monthly cost: ~$2–5 for daily analytics workload
-
----
-
-## Analysis Goals
-
-1. **Long-term delay trends** (2000–2025): Are flights getting better or worse?
-2. **Seasonal patterns**: Summer/holiday delay spikes
-3. **Airline comparison**: On-time performance ranking
-4. **Airport hotspots**: Which hubs cause the most propagated delays?
-5. **Delay cause analysis**: COVID-19 impact on weather vs carrier delays
-6. **Route-level insights**: Worst delay routes by origin-destination pair
-7. **Day-of-week patterns**: When is the best day to fly?
+- The repository contains both local scheduler orchestration and an Airflow DAG.
+- `raw_data/` and `cleaned_data/` are local working directories generated by the pipelines.
+- `test.java` is not part of the main production pipeline.
