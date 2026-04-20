@@ -5,6 +5,7 @@ Shows real-time FAA National Airspace System (NAS) delay programs
 sourced from the daily FAA NAS ingestion pipeline.
 """
 
+import math
 import sys
 from pathlib import Path
 
@@ -68,7 +69,7 @@ if not kpi_df.empty:
     col2.metric("Total Ground Stops",           int(row["TOTAL_GROUND_STOPS"]  or 0))
     col3.metric("Total Ground Delays",          int(row["TOTAL_GROUND_DELAYS"] or 0))
     worst = row["WORST_AVG_DELAY_MIN"]
-    col4.metric("Worst Avg Delay (min)",        f"{int(worst)} min" if worst else "N/A")
+    col4.metric("Worst Avg Delay (min)",        f"{int(worst)} min" if (worst and not math.isnan(float(worst))) else "N/A")
 
 st.divider()
 
