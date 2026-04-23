@@ -37,7 +37,7 @@ year_start, year_end = st.sidebar.slider(
 # ── Load data ─────────────────────────────────────────────────────────────────
 monthly_df = run_query(f"""
     SELECT YEAR, MONTH,
-           TOTAL_FLIGHTS, TOTAL_DELAYED, TOTAL_CANCELLED,
+           TOTAL_FLIGHTS, TOTAL_DELAYED,
            DELAY_RATE, AVG_DEP_DELAY_MIN, AVG_ARR_DELAY_MIN,
            CARRIER_DELAY_SHARE, WEATHER_DELAY_SHARE, NAS_DELAY_SHARE
     FROM ANALYTICS.DELAY_TRENDS_MONTHLY
@@ -54,9 +54,6 @@ monthly_df["PERIOD"] = (
     monthly_df["YEAR"].astype(str) + "-"
     + monthly_df["MONTH"].astype(str).str.zfill(2)
 )
-monthly_df["CANCEL_RATE"] = (
-    100.0 * monthly_df["TOTAL_CANCELLED"] / monthly_df["TOTAL_FLIGHTS"]
-).round(2)
 
 # Yearly aggregate
 yearly_df = (
@@ -64,7 +61,6 @@ yearly_df = (
     .agg(
         TOTAL_FLIGHTS=("TOTAL_FLIGHTS", "sum"),
         TOTAL_DELAYED=("TOTAL_DELAYED", "sum"),
-        TOTAL_CANCELLED=("TOTAL_CANCELLED", "sum"),
         AVG_DEP_DELAY_MIN=("AVG_DEP_DELAY_MIN", "mean"),
     )
     .reset_index()
@@ -72,12 +68,9 @@ yearly_df = (
 yearly_df["DELAY_RATE"] = (
     100.0 * yearly_df["TOTAL_DELAYED"] / yearly_df["TOTAL_FLIGHTS"]
 ).round(2)
-yearly_df["CANCEL_RATE"] = (
-    100.0 * yearly_df["TOTAL_CANCELLED"] / yearly_df["TOTAL_FLIGHTS"]
-).round(2)
 
 # ── Chart 1: Annual delay & cancellation rate ─────────────────────────────────
-st.subheader(f"Annual Delay & Cancellation Rate ({year_start}–{year_end})")
+st.subheader(f"Annual Delay Rate ({year_start}–{year_end})")
 
 fig1 = go.Figure()
 fig1.add_trace(go.Scatter(
@@ -87,16 +80,9 @@ fig1.add_trace(go.Scatter(
     line=dict(color="#EF553B", width=2),
     marker=dict(size=6),
 ))
-fig1.add_trace(go.Scatter(
-    x=yearly_df["YEAR"], y=yearly_df["CANCEL_RATE"],
-    name="Cancellation Rate (%)",
-    mode="lines+markers",
-    line=dict(color="#FF7F0E", width=2, dash="dot"),
-    marker=dict(size=6),
-))
 fig1.update_layout(
     xaxis_title="Year",
-    yaxis_title="Rate (%)",
+    yaxis_title="Delay Rate (%)",
     hovermode="x unified",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )

@@ -158,37 +158,6 @@ def _extract_records_from_xml(
     fetch_date: date,
     snapshot_ts: str,
 ) -> list[dict]:
-    """Parse the XML response from nasstatus.faa.gov into flat record dicts.
-
-    The API returns application/xml with this structure:
-      <AIRPORT_STATUS_INFORMATION>
-        <Delay_type>
-          <Name>Ground Delay Programs</Name>
-          <Ground_Delay_List>
-            <Ground_Delay><ARPT>SFO</ARPT><Reason>…</Reason><Avg>29 minutes</Avg>…</Ground_Delay>
-          </Ground_Delay_List>
-        </Delay_type>
-        <Delay_type>
-          <Name>General Arrival/Departure Delay Info</Name>
-          <Arrival_Departure_Delay_List>
-            <Delay><ARPT>PBI</ARPT><Reason>…</Reason>
-              <Arrival_Departure Type="Departure"><Min>31 minutes</Min><Max>45 minutes</Max><Trend>Increasing</Trend></Arrival_Departure>
-            </Delay>
-          </Arrival_Departure_Delay_List>
-        </Delay_type>
-        <Delay_type>
-          <Name>Airport Closures</Name>
-          <Airport_Closure_List>
-            <Airport><ARPT>CAE</ARPT><Reason>…</Reason><Start>…</Start><Reopen>…</Reopen></Airport>
-          </Airport_Closure_List>
-        </Delay_type>
-      </AIRPORT_STATUS_INFORMATION>
-
-    We use XPath ".//*[ARPT]" to find every entry element that has an ARPT
-    child, regardless of the wrapper tag name. Min/Max/Trend may be nested
-    inside a sub-element (e.g. Arrival_Departure), so we use ".//Tag" to
-    search all descendants.
-    """
     records = []
     fetch_date_str = fetch_date.isoformat()
 

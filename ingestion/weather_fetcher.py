@@ -1,27 +1,3 @@
-"""
-Open-Meteo Historical Archive API fetcher.
-API: https://archive-api.open-meteo.com/v1/archive
-No API key required. Free for non-commercial use.
-Data range: 1940–present (ERA5 reanalysis + station data).
-
-Rate-limit strategy
--------------------
-Open-Meteo free tier allows ~10 req/min sustained (1 req/6s).
-We use workers=1 (sequential) with a 7-second sleep between requests.
-On 429, we wait a fixed 65 seconds (one rate-limit window) and retry once.
-No exponential back-off — it only wastes time.
-
-Performance
------------
-~1300 tasks (50 airports × 26 years) × 7s ≈ 150 min total.
-Already-downloaded files are skipped instantly (resumable).
-
-Usage:
-    python weather_fetcher.py --test                          # fetch ATL 2023
-    python weather_fetcher.py --airport ATL --year 2023       # single year
-    python weather_fetcher.py --start-year 2000 --end-year 2025
-"""
-
 import argparse
 import json
 import logging

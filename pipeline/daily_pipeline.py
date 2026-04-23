@@ -6,12 +6,14 @@ Runs every day (triggered by launchd or Airflow) to:
   2. Clean with PySpark
   3. Load to Snowflake RAW.FAA_NAS_STATUS_RAW
   4. Refresh all ANALYTICS tables (BTS-sourced)
+  5. Generate Claude-powered Chinese anomaly report (requires ANTHROPIC_API_KEY)
 
 Usage:
-    python daily_pipeline.py                # process yesterday
+    python daily_pipeline.py                # process yesterday (all steps)
     python daily_pipeline.py --date 2025-04-02
     python daily_pipeline.py --dry-run      # skip Snowflake load
     python daily_pipeline.py --no-faa-nas   # analytics-only run
+    python daily_pipeline.py --skip-report  # skip Claude report generation
 """
 
 import argparse
@@ -211,6 +213,43 @@ def step_run_analytics(target_date: date, dry_run: bool = False):
         logger.info("Analytics completed")
 
 
+def step_generate_report(target_date: date, dry_run: bool = False):
+    """
+    STEP 5: Call Claude API to generate a structured Chinese anomaly report
+    from FAA NAS data loaded in Snowflake.
+    Non-fatal — a failure here will not abort the pipeline.
+    Requires ANTHROPIC_API_KEY in the environment.
+    """
+    logger.info("STEP 5: Generating FAA NAS anomaly report for %s", target_date)
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.warning(
+            "ANTHROPIC_API_KEY not set — skipping Claude report generation. "
+            "Add ANTHROPIC_API_KEY to code/.env to enable this step."
+        )
+        return
+
+    try:
+        # Import lazily — avoids hard dependency if anthropic package is missing
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "faa_nas_anomaly_report",
+            BASE_DIR / "analysis" / "faa_nas_anomaly_report.py",
+        )
+        report_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(report_mod)
+
+        summary = report_mod.run_report(target_date, dry_run=dry_run)
+        logger.info("FAA NAS report generated (%d chars)", len(summary))
+    except ImportError as exc:
+        logger.warning(
+            "Could not import 'anthropic' package — skipping report generation. "
+            "Run: pip install anthropic>=0.49.0  (%s)", exc
+        )
+    except Exception as exc:
+        logger.warning("FAA NAS report generation failed (non-fatal): %s", exc, exc_info=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Daily incremental flight data pipeline")
     parser.add_argument("--date",           help="Target date YYYY-MM-DD (default: yesterday)")
@@ -219,6 +258,8 @@ def main():
     parser.add_argument("--skip-clean",     action="store_true")
     parser.add_argument("--skip-load",      action="store_true")
     parser.add_argument("--skip-analytics", action="store_true")
+    parser.add_argument("--skip-report",   action="store_true",
+                        help="Skip Claude NAS report generation")
     parser.add_argument("--faa-nas",        action="store_true", default=True,
                         dest="faa_nas",
                         help="Enable FAA NAS status fetch/clean/load (default: on)")
@@ -268,6 +309,10 @@ def main():
     # it refreshes BTS-sourced ANALYTICS tables.
     if not args.skip_analytics:
         step_run_analytics(target, dry_run=args.dry_run)
+
+    # Claude-powered NAS anomaly report (non-fatal, needs ANTHROPIC_API_KEY)
+    if not args.skip_report:
+        step_generate_report(target, dry_run=args.dry_run)
 
     logger.info("Daily pipeline complete for %s", target)
 

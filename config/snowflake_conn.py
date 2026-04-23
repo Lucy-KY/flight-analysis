@@ -1,8 +1,3 @@
-"""
-Snowflake connection helper — RSA key pair authentication (MFA bypass).
-All pipeline scripts import get_conn() from here.
-"""
-
 import os
 from pathlib import Path
 

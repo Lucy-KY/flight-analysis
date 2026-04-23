@@ -21,6 +21,10 @@ pyarrow>=14.0.0
 # Visualization
 streamlit>=1.32.0
 plotly>=5.20.0
+matplotlib>=3.8.0
+
+# Claude API (FAA NAS anomaly report generation)
+anthropic>=0.49.0
 
 # ML / Prediction
 xgboost>=2.0.0

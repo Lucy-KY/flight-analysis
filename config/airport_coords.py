@@ -1,8 +1,3 @@
-"""
-Airport coordinates and timezones for the 50 US airports in the flight delay project.
-Maps IATA code → (latitude, longitude, timezone_string).
-"""
-
 AIRPORT_COORDS: dict[str, tuple[float, float, str]] = {
     "ATL": (33.6407, -84.4277, "America/New_York"),
     "DFW": (32.8998, -97.0403, "America/Chicago"),
